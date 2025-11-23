@@ -1,0 +1,42 @@
+// Error Codes - Simple và practical
+export const ERROR_CODES = {
+  // Validation Errors
+  VALIDATION_ERROR: "VALIDATION_ERROR",
+  INVALID_INPUT: "INVALID_INPUT",
+
+  // Business Errors
+  NOT_FOUND: "NOT_FOUND",
+  ALREADY_EXISTS: "ALREADY_EXISTS",
+  BUSINESS_RULE_VIOLATION: "BUSINESS_RULE_VIOLATION",
+
+  // Security Errors
+  UNAUTHORIZED: "UNAUTHORIZED",
+  FORBIDDEN: "FORBIDDEN",
+
+  // Infrastructure Errors
+  EXTERNAL_SERVICE_ERROR: "EXTERNAL_SERVICE_ERROR",
+
+  // System Errors
+  INTERNAL_ERROR: "INTERNAL_ERROR",
+  UNEXPECTED_ERROR: "UNEXPECTED_ERROR",
+
+  // Rate Limiting
+  RATE_LIMIT_EXCEEDED: "RATE_LIMIT_EXCEEDED",
+} as const;
+
+export type ErrorCode = (typeof ERROR_CODES)[keyof typeof ERROR_CODES];
+
+// HTTP Status Codes
+export const HTTP_STATUS = {
+  BAD_REQUEST: 400,
+  UNAUTHORIZED: 401,
+  FORBIDDEN: 403,
+  NOT_FOUND: 404,
+  CONFLICT: 409,
+  TOO_MANY_REQUESTS: 429,
+  INTERNAL_SERVER_ERROR: 500,
+  BAD_GATEWAY: 502,
+  SERVICE_UNAVAILABLE: 503,
+} as const;
+
+export type HttpStatus = (typeof HTTP_STATUS)[keyof typeof HTTP_STATUS];
