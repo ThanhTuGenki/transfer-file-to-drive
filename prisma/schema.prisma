@@ -10,13 +10,39 @@ datasource db {
     url      = env("DATABASE_URL")
 }
 
-model Todo {
-    id          String   @id @default(cuid())
-    title       String
-    description String?
-    completed   Boolean  @default(false)
-    createdAt   DateTime @default(now()) @map("created_at")
-    updatedAt   DateTime @updatedAt @map("updated_at")
+enum TransferStatus {
+    PENDING
+    SCANNING
+    PROCESSING
+    COMPLETED
+    FAILED
+}
 
-    @@map("todos")
+model TransferFolder {
+    id        String         @id @default(cuid())
+    url       String
+    name      String
+    status    TransferStatus @default(PENDING)
+    createdAt DateTime       @default(now()) @map("created_at")
+    updatedAt DateTime       @updatedAt @map("updated_at")
+
+    files TransferFile[]
+
+    @@map("transfer_folders")
+}
+
+model TransferFile {
+    id          String         @id @default(cuid())
+    folderId    String         @map("folder_id")
+    folder      TransferFolder @relation(fields: [folderId], references: [id], onDelete: Cascade)
+    originalUrl String         @map("original_url")
+    name        String
+    status      TransferStatus @default(PENDING)
+    retryCount  Int            @default(0) @map("retry_count")
+    errorLog    String?        @map("error_log")
+    localPath   String?        @map("local_path") // Path to downloaded local file for retry
+    createdAt   DateTime       @default(now()) @map("created_at")
+    updatedAt   DateTime       @updatedAt @map("updated_at")
+
+    @@map("transfer_files")
 }

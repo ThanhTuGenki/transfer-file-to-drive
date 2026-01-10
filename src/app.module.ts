@@ -4,7 +4,7 @@ import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { databaseConfig, envSchema } from '@configs/configuration.config';
 import { PrismaModule } from '@core/prisma/prisma.module';
-import { TodoModule } from './todo/todo.module';
+import { TransferFileModule } from './transfer-file/transfer-file.module';
 
 @Module({
 	imports: [
@@ -29,7 +29,7 @@ import { TodoModule } from './todo/todo.module';
 			},
 		}),
 		PrismaModule,
-		TodoModule,
+		TransferFileModule,
 	],
 	controllers: [AppController],
 	providers: [AppService],

@@ -22,12 +22,15 @@
 		"gen:module": "ts-node scripts/generate-module.ts"
 	},
 	"dependencies": {
+		"@nestjs/bullmq": "^11.0.4",
 		"@nestjs/common": "^11.0.1",
 		"@nestjs/config": "^4.0.2",
 		"@nestjs/core": "^11.0.1",
 		"@nestjs/platform-express": "^11.0.1",
 		"@prisma/client": "^6.19.0",
+		"bullmq": "^5.66.4",
 		"nestjs-zod": "^5.0.1",
+		"playwright": "^1.57.0",
 		"prisma": "^6.19.0",
 		"reflect-metadata": "^0.2.2",
 		"rxjs": "^7.8.1",

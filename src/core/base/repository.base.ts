@@ -200,9 +200,25 @@ export abstract class PrismaBaseRepository<
 		}
 	}
 
-	// !--- Private Helper Methods ---
+	// !--- Public Helper Methods ---
+	// These methods are exposed to allow concrete repositories to implement
+	// their own create/update methods if needed by their interfaces
 
-	private async update(
+	public async create(
+		entity: TEntity,
+		tx?: PrismaTransactionClient,
+	): Promise<TEntity> {
+		const client = this.getClient(tx);
+		const createData = this.mapEntityToCreateInput(entity);
+
+		const newData = await client.create({
+			data: createData,
+		});
+
+		return this.fromData(newData);
+	}
+
+	public async update(
 		entity: TEntity,
 		tx?: PrismaTransactionClient,
 	): Promise<TEntity> {
@@ -222,19 +238,5 @@ export abstract class PrismaBaseRepository<
 		});
 
 		return this.fromData(updatedData);
-	}
-
-	private async create(
-		entity: TEntity,
-		tx?: PrismaTransactionClient,
-	): Promise<TEntity> {
-		const client = this.getClient(tx);
-		const createData = this.mapEntityToCreateInput(entity);
-
-		const newData = await client.create({
-			data: createData,
-		});
-
-		return this.fromData(newData);
 	}
 }
