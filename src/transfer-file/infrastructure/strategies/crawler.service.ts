@@ -38,30 +38,199 @@ export class CrawlerService {
     }
 
     /**
-     * Download file using curl (robust for large files)
+     * Download file using fetch with streaming (avoids shell escaping issues)
      */
-    private async downloadWithCurl(
+    private async downloadWithFetch(
         url: string,
         headers: BrowserHeaders,
         outputPath: string,
     ): Promise<void> {
-        this.logger.log(`[Curl] Starting download to: ${outputPath}`);
-
         const cookieString = headers['cookie'] || headers['Cookie'];
         const userAgent = headers['user-agent'] || headers['User-Agent'];
         const referer = headers['referer'] || headers['Referer'];
 
-        const command = `curl -L -k -b "${cookieString}" -A "${userAgent}" -e "${referer}" -o "${outputPath}" "${url}"`;
+        const fetchHeaders: Record<string, string> = {
+            // Google video streams require Range header
+            'range': 'bytes=0-',
+            'accept-encoding': 'identity',
+        };
+        if (cookieString) fetchHeaders['cookie'] = cookieString;
+        if (userAgent) fetchHeaders['user-agent'] = userAgent;
+        if (referer) fetchHeaders['referer'] = referer;
 
         try {
-            await execAsync(command, { maxBuffer: 1024 * 1024 * 10 });
+            const response = await fetch(url, {
+                headers: fetchHeaders,
+                redirect: 'manual',  // Handle redirects manually to keep Range header
+            });
+
+            // Handle redirect manually
+            if (response.status === 301 || response.status === 302 || response.status === 307 || response.status === 308) {
+                const redirectUrl = response.headers.get('location');
+                if (redirectUrl) {
+                    this.logger.log(`[Debug] Redirecting to: ${redirectUrl.substring(0, 100)}...`);
+                    const redirectResponse = await fetch(redirectUrl, {
+                        headers: fetchHeaders,
+                        redirect: 'manual',
+                    });
+
+                    // Check final response
+                    this.logger.log(`[Debug] Final Status: ${redirectResponse.status}, Type: ${redirectResponse.headers.get('content-type')}, Length: ${redirectResponse.headers.get('content-length')}`);
+
+                    if (!redirectResponse.ok) {
+                        throw new Error(`HTTP ${redirectResponse.status}: ${redirectResponse.statusText}`);
+                    }
+
+                    // Get content length for progress tracking
+                    const contentLength = redirectResponse.headers.get('content-length');
+                    const totalBytes = contentLength ? parseInt(contentLength, 10) : null;
+
+                    const stream = redirectResponse.body as any;
+                    const reader = stream.getReader();
+                    const fileHandle = await fs.open(outputPath, 'w');
+
+                    let downloadedBytes = 0;
+                    let lastLoggedPercent = -1;
+
+                    while (true) {
+                        const { done, value } = await reader.read();
+                        if (done) break;
+
+                        await fileHandle.writeFile(value);
+                        downloadedBytes += value.length;
+
+                        // Log progress every 10%
+                        if (totalBytes) {
+                            const percent = Math.floor((downloadedBytes / totalBytes) * 100);
+                            if (percent > lastLoggedPercent && percent % 10 === 0) {
+                                const mb = (downloadedBytes / 1024 / 1024).toFixed(2);
+                                const totalMb = (totalBytes / 1024 / 1024).toFixed(2);
+                                this.logger.log(`[Download] ${percent}% (${mb}/${totalMb} MB)`);
+                                lastLoggedPercent = percent;
+                            }
+                        }
+                    }
+
+                    await fileHandle.close();
+
+                    const stats = await fs.stat(outputPath);
+                    const size = stats.size;
+
+                    if (size < 100000) {
+                        throw new Error(
+                            `File too small: ${size} bytes. Likely an error page.`,
+                        );
+                    }
+
+                    return;
+                }
+            }
+
+            this.logger.log(`[Debug] Status: ${response.status}, Type: ${response.headers.get('content-type')}, Length: ${response.headers.get('content-length')}`);
+
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+            }
+
+            // Check if response is text (might be redirect URL in body)
+            const contentType = response.headers.get('content-type') || '';
+            if (contentType.includes('text/plain')) {
+                const stream = response.body as any;
+                const reader = stream.getReader();
+                const { value } = await reader.read();
+
+                if (value) {
+                    const text = Buffer.from(value).toString('utf8').trim();
+                    // Check if it's a redirect URL
+                    if (text.startsWith('https://') || text.startsWith('http://')) {
+                        this.logger.log(`[Debug] Got redirect URL in body, fetching: ${text.substring(0, 80)}...`);
+                        const redirectResponse = await fetch(text, {
+                            headers: fetchHeaders,
+                            redirect: 'manual',
+                        });
+
+                        this.logger.log(`[Debug] Final Status: ${redirectResponse.status}, Type: ${redirectResponse.headers.get('content-type')}`);
+
+                        if (!redirectResponse.ok) {
+                            throw new Error(`HTTP ${redirectResponse.status}: ${redirectResponse.statusText}`);
+                        }
+
+                        const contentLength = redirectResponse.headers.get('content-length');
+                        const totalBytes = contentLength ? parseInt(contentLength, 10) : null;
+
+                        const redirectStream = redirectResponse.body as any;
+                        const redirectReader = redirectStream.getReader();
+                        const fileHandle = await fs.open(outputPath, 'w');
+
+                        let downloadedBytes = 0;
+                        let lastLoggedPercent = -1;
+
+                        while (true) {
+                            const { done, value: chunk } = await redirectReader.read();
+                            if (done) break;
+
+                            await fileHandle.writeFile(chunk);
+                            downloadedBytes += chunk.length;
+
+                            if (totalBytes) {
+                                const percent = Math.floor((downloadedBytes / totalBytes) * 100);
+                                if (percent > lastLoggedPercent && percent % 10 === 0) {
+                                    const mb = (downloadedBytes / 1024 / 1024).toFixed(2);
+                                    const totalMb = (totalBytes / 1024 / 1024).toFixed(2);
+                                    this.logger.log(`[Download] ${percent}% (${mb}/${totalMb} MB)`);
+                                    lastLoggedPercent = percent;
+                                }
+                            }
+                        }
+
+                        await fileHandle.close();
+
+                        const stats = await fs.stat(outputPath);
+                        const size = stats.size;
+
+                        if (size < 100000) {
+                            throw new Error(`File too small: ${size} bytes. Likely an error page.`);
+                        }
+
+                        return;
+                    }
+                }
+            }
+
+            // Get content length for progress tracking
+            const contentLength = response.headers.get('content-length');
+            const totalBytes = contentLength ? parseInt(contentLength, 10) : null;
+
+            const stream = response.body as any;
+            const reader = stream.getReader();
+            const fileHandle = await fs.open(outputPath, 'w');
+
+            let downloadedBytes = 0;
+            let lastLoggedPercent = -1;
+
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break;
+
+                await fileHandle.writeFile(value);
+                downloadedBytes += value.length;
+
+                // Log progress every 10%
+                if (totalBytes) {
+                    const percent = Math.floor((downloadedBytes / totalBytes) * 100);
+                    if (percent > lastLoggedPercent && percent % 10 === 0) {
+                        const mb = (downloadedBytes / 1024 / 1024).toFixed(2);
+                        const totalMb = (totalBytes / 1024 / 1024).toFixed(2);
+                        this.logger.log(`[Download] ${percent}% (${mb}/${totalMb} MB)`);
+                        lastLoggedPercent = percent;
+                    }
+                }
+            }
+
+            await fileHandle.close();
 
             const stats = await fs.stat(outputPath);
             const size = stats.size;
-
-            this.logger.log(
-                `[Curl] Download finished. Size: ${(size / 1024 / 1024).toFixed(2)} MB`,
-            );
 
             if (size < 100000) {
                 throw new Error(
@@ -69,7 +238,7 @@ export class CrawlerService {
                 );
             }
         } catch (error) {
-            this.logger.error(`Curl error: ${error.message}`);
+            this.logger.error(`Fetch error: ${error.message}`);
             throw error;
         }
     }
@@ -155,18 +324,16 @@ export class CrawlerService {
             throw new Error('TIMEOUT: Failed to capture streams.');
         }
 
-        // Refine headers if needed
-        if (!headers['cookie'] && !headers['Cookie']) {
-            this.logger.log('[Info] Refining headers from context...');
-            const cookies = await context.cookies();
-            const cookieHeader = cookies.map((c) => `${c.name}=${c.value}`).join('; ');
-            const ua = await page.evaluate(() => navigator.userAgent);
-            headers = {
-                cookie: cookieHeader,
-                'user-agent': ua,
-                referer: 'https://drive.google.com/',
-            };
-        }
+        // Always refine headers from context to ensure complete cookies
+        this.logger.log('[Info] Refining headers from context...');
+        const cookies = await context.cookies();
+        const cookieHeader = cookies.map((c) => `${c.name}=${c.value}`).join('; ');
+        const ua = await page.evaluate(() => navigator.userAgent);
+        headers = {
+            cookie: cookieHeader,
+            'user-agent': ua,
+            referer: 'https://drive.google.com/',
+        };
 
         await page.close();
 
@@ -183,7 +350,7 @@ export class CrawlerService {
 
         const { videoStreamUrl, audioStreamUrl, headers } = await this.captureStreams(fileUrl);
 
-        this.logger.log('[4/4] Downloading streams (using Curl)...');
+        this.logger.log('[4/4] Downloading streams (using Fetch)...');
 
         const timestamp = Date.now();
         const videoPath = path.join(this.DOWNLOADS_DIR, `video_${timestamp}.mp4`);
@@ -191,10 +358,10 @@ export class CrawlerService {
         const finalPath = path.join(this.DOWNLOADS_DIR, `output_${timestamp}.mp4`);
 
         this.logger.log('-> Downloading Video Track...');
-        await this.downloadWithCurl(videoStreamUrl, headers, videoPath);
+        await this.downloadWithFetch(videoStreamUrl, headers, videoPath);
 
         this.logger.log('-> Downloading Audio Track...');
-        await this.downloadWithCurl(audioStreamUrl, headers, audioPath);
+        await this.downloadWithFetch(audioStreamUrl, headers, audioPath);
 
         this.logger.log('[Merging] Merging files with FFmpeg...');
         const ffmpegCommand = `ffmpeg -i "${videoPath}" -i "${audioPath}" -c:v copy -c:a aac "${finalPath}" -y`;

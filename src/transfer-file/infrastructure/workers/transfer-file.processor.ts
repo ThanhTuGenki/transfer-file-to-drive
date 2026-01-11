@@ -20,6 +20,7 @@ interface ProcessFileJobData {
 
 @Processor('file-queue', {
     concurrency: 1, // Process files sequentially
+    lockDuration: 0, // Disable lock - no need with concurrency=1
 })
 export class TransferFileProcessor extends WorkerHost {
     private readonly logger = new Logger(TransferFileProcessor.name);
@@ -81,6 +82,11 @@ export class TransferFileProcessor extends WorkerHost {
 
             // Cleanup local files on failure
             shouldCleanup = true;
+
+            // Remove job from Redis (error already saved to database)
+            await job.remove().catch(() => {
+                // Job might already be removed, ignore error
+            });
 
             throw error;
         } finally {
