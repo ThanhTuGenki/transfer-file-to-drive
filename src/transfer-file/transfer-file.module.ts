@@ -5,6 +5,7 @@ import { PrismaModule } from '@core/prisma/prisma.module';
 import { TransferFolderProcessor } from './infrastructure/workers/transfer-folder.processor';
 import { TransferFileProcessor } from './infrastructure/workers/transfer-file.processor';
 import { CrawlerService } from './infrastructure/strategies/crawler.service';
+import { BrowserService } from './infrastructure/strategies/browser.service';
 import { PrismaTransferFolderRepository } from './infrastructure/prisma-transfer-folder.repository';
 import { PrismaTransferFileRepository } from './infrastructure/prisma-transfer-file.repository';
 import { CreateTransferFolderUseCase } from './application/use-cases/create-transfer-folder.use-case';
@@ -35,6 +36,7 @@ import { TransferController } from './presentation/transfer.controller';
     ],
     controllers: [TransferController],
     providers: [
+        BrowserService,
         CrawlerService,
         PrismaTransferFolderRepository,
         PrismaTransferFileRepository,
@@ -44,6 +46,7 @@ import { TransferController } from './presentation/transfer.controller';
         TransferFileProcessor,
     ],
     exports: [
+        BrowserService,
         CrawlerService,
         PrismaTransferFolderRepository,
         PrismaTransferFileRepository,

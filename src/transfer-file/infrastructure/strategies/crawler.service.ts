@@ -1,9 +1,9 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { chromium, Browser, BrowserContext, Page } from 'playwright';
 import { promises as fs } from 'fs';
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import * as path from 'path';
+import { BrowserService } from './browser.service';
 
 const execAsync = promisify(exec);
 
@@ -25,8 +25,9 @@ interface StreamResult {
 @Injectable()
 export class CrawlerService {
     private readonly logger = new Logger(CrawlerService.name);
-    private readonly AUTH_FILE = path.join(process.cwd(), 'auth.json');
     private readonly DOWNLOADS_DIR = path.join(process.cwd(), 'downloads');
+
+    constructor(private readonly browserService: BrowserService) {}
 
     async ensureDownloadsDir(): Promise<void> {
         try {
@@ -74,57 +75,18 @@ export class CrawlerService {
     }
 
     /**
-     * Launch browser and capture video/audio streams
+     * Capture video/audio streams from Google Drive video page
+     * Uses existing browser from BrowserService
      */
-    private async runBrowser(
-        url: string,
-        isHeadless: boolean = true,
-    ): Promise<StreamResult> {
-        this.logger.log(
-            isHeadless
-                ? '[1/6] Launching browser (Headless Mode)...'
-                : '[1/6] Launching browser (UI Mode for Login)...',
-        );
-
-        let storageState = null;
-        try {
-            const authData = await fs.readFile(this.AUTH_FILE, 'utf8');
-            storageState = JSON.parse(authData);
-            this.logger.log('[Auth] Session loaded.');
-        } catch (e) {
-            // No session file or invalid JSON
-        }
-
-        const browser = await chromium.launch({
-            headless: isHeadless,
-            channel: 'chrome',
-            args: [
-                '--disable-blink-features=AutomationControlled',
-                '--no-sandbox',
-                '--start-maximized',
-                '--disable-infobars',
-            ],
-        });
-
-        const context = await browser.newContext({
-            viewport: { width: 1280, height: 720 },
-            storageState: storageState || undefined,
-            userAgent:
-                'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36',
-        });
-
-        const page = await context.newPage();
-
-        await page.addInitScript(() => {
-            Object.defineProperty(navigator, 'webdriver', {
-                get: () => undefined,
-            });
-        });
+    private async captureStreams(fileUrl: string): Promise<StreamResult> {
+        const context = this.browserService.getContext();
+        const page = await this.browserService.newPage();
 
         let videoStreamUrl: string | null = null;
         let audioStreamUrl: string | null = null;
         let headers: BrowserHeaders = {};
 
+        // Listen for stream requests
         page.on('request', (request) => {
             const requestUrl = request.url();
             if (requestUrl.includes('videoplayback') && requestUrl.includes('clen=')) {
@@ -145,55 +107,21 @@ export class CrawlerService {
             }
         });
 
-        this.logger.log(`[2/6] Navigating to ${url}`);
-        await page.goto(url);
+        this.logger.log(`[1/4] Navigating to ${fileUrl}`);
+        await page.goto(fileUrl);
         await page.waitForTimeout(2000);
 
+        // Check if session expired
         const currentUrl = page.url();
-        const isLoginPage =
-            currentUrl.includes('accounts.google.com') ||
-            (await page.$('input[type="email"]'));
+        const isLoginPage = currentUrl.includes('accounts.google.com') || (await page.$('input[type="email"]'));
 
-        if (isHeadless && isLoginPage) {
-            this.logger.warn('⚠️  Session Expired or Missing. Switching to UI Mode...');
-            await browser.close();
-            throw new Error('SESSION_EXPIRED');
-        }
-
-        if (!isHeadless) {
-            this.logger.log('\n===================================================');
-            this.logger.log('⚠️  ACTION REQUIRED: PLEASE LOG IN MANUALLY');
-            this.logger.log('   The script will wait until the video page loads.');
-            this.logger.log('===================================================\n');
-
-            while (true) {
-                try {
-                    if (
-                        (await page.$('video')) ||
-                        (await page.$('#drive-viewer-video-player-object-0'))
-                    ) {
-                        break;
-                    }
-                    const u = page.url();
-                    if (
-                        !u.includes('accounts.google.com') &&
-                        u.includes('drive.google.com')
-                    ) {
-                        if (await page.$('div[role="button"][aria-label="Play"]'))
-                            break;
-                    }
-                } catch (e) {
-                    // Navigation happened, continue waiting
-                }
-                await page.waitForTimeout(1000);
-            }
-
-            this.logger.log('[Auth] Login detected! Saving session...');
-            await context.storageState({ path: this.AUTH_FILE });
+        if (isLoginPage) {
+            await page.close();
+            throw new Error('SESSION_EXPIRED: Google session expired. Please restart server and login again.');
         }
 
         // Auto-play
-        this.logger.log('[Auto-Play] Attempting to auto-play...');
+        this.logger.log('[2/4] Attempting to auto-play...');
         try {
             const playSelectors = [
                 'div[role="button"][aria-label="Play"]',
@@ -202,7 +130,7 @@ export class CrawlerService {
             ];
             for (const selector of playSelectors) {
                 if (await page.$(selector)) {
-                    await page.click(selector, { force: true }).catch(() => { });
+                    await page.click(selector, { force: true }).catch(() => {});
                     await page.waitForTimeout(500);
                 }
             }
@@ -210,23 +138,24 @@ export class CrawlerService {
             // Ignore
         }
 
-        this.logger.log('[3/6] Waiting for streams... (Timeout: 1 min)');
+        this.logger.log('[3/4] Waiting for streams... (Timeout: 1 min)');
         let checks = 0;
         while ((!videoStreamUrl || !audioStreamUrl) && checks < 60) {
             await page.waitForTimeout(1000);
             checks++;
             if (checks % 5 === 0 && !videoStreamUrl) {
-                await page.mouse.click(640, 360).catch(() => { });
+                await page.mouse.click(640, 360).catch(() => {});
             }
             if (checks % 10 === 0) process.stdout.write('.');
         }
         console.log('\n');
 
         if (!videoStreamUrl || !audioStreamUrl) {
-            await browser.close();
+            await page.close();
             throw new Error('TIMEOUT: Failed to capture streams.');
         }
 
+        // Refine headers if needed
         if (!headers['cookie'] && !headers['Cookie']) {
             this.logger.log('[Info] Refining headers from context...');
             const cookies = await context.cookies();
@@ -239,8 +168,7 @@ export class CrawlerService {
             };
         }
 
-        await context.storageState({ path: this.AUTH_FILE });
-        await browser.close();
+        await page.close();
 
         return { videoStreamUrl, audioStreamUrl, headers };
     }
@@ -251,21 +179,11 @@ export class CrawlerService {
     async downloadAndProcess(fileUrl: string): Promise<string> {
         await this.ensureDownloadsDir();
 
-        let result: StreamResult;
-        try {
-            result = await this.runBrowser(fileUrl, true);
-        } catch (error) {
-            if (error.message === 'SESSION_EXPIRED') {
-                this.logger.log('\n[System] Restarting in UI Mode...');
-                result = await this.runBrowser(fileUrl, false);
-            } else {
-                throw error;
-            }
-        }
+        this.logger.log('[0/4] Starting download process...');
 
-        const { videoStreamUrl, audioStreamUrl, headers } = result;
+        const { videoStreamUrl, audioStreamUrl, headers } = await this.captureStreams(fileUrl);
 
-        this.logger.log('[4/6] Downloading streams (using Curl)...');
+        this.logger.log('[4/4] Downloading streams (using Curl)...');
 
         const timestamp = Date.now();
         const videoPath = path.join(this.DOWNLOADS_DIR, `video_${timestamp}.mp4`);
@@ -278,7 +196,7 @@ export class CrawlerService {
         this.logger.log('-> Downloading Audio Track...');
         await this.downloadWithCurl(audioStreamUrl, headers, audioPath);
 
-        this.logger.log('[6/6] Merging files with FFmpeg...');
+        this.logger.log('[Merging] Merging files with FFmpeg...');
         const ffmpegCommand = `ffmpeg -i "${videoPath}" -i "${audioPath}" -c:v copy -c:a aac "${finalPath}" -y`;
 
         await execAsync(ffmpegCommand);
