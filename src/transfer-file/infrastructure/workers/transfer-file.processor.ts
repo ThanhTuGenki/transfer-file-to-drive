@@ -57,21 +57,9 @@ export class TransferFileProcessor extends WorkerHost {
             file.markAsProcessing();
             await this.fileRepo.update(file);
 
-            let outputPath: string;
-
-            // Check if we have a local file from previous attempt
-            if (file.hasLocalFile() && file.localPath && fs.existsSync(file.localPath)) {
-                outputPath = file.localPath;
-                this.logger.log(`[File ${fileId}] Reusing local file: ${outputPath}`);
-            } else {
-                // Download and merge video
-                outputPath = await this.crawler.downloadAndProcess(file.originalUrl);
-                this.logger.log(`[File ${fileId}] Downloaded to: ${outputPath}`);
-
-                // Save local path to entity for retry
-                file.setLocalPath(outputPath);
-                await this.fileRepo.update(file);
-            }
+            // Download and merge video
+            const outputPath = await this.crawler.downloadAndProcess(file.originalUrl);
+            this.logger.log(`[File ${fileId}] Downloaded to: ${outputPath}`);
 
             // Upload to destination Drive using Rclone
             finalPath = await this.uploadToDrive(outputPath, folder.name, file.name);
@@ -87,30 +75,16 @@ export class TransferFileProcessor extends WorkerHost {
         } catch (error) {
             this.logger.error(`[File ${fileId}] Processing failed: ${error.message}`);
 
-            // Mark as FAILED and increment retry count
+            // Mark as FAILED (no automatic retry)
             file.markAsFailed(error.message);
             await this.fileRepo.update(file);
 
-            // Retry if possible
-            if (file.canRetry(3)) {
-                this.logger.log(`[File ${fileId}] Scheduling retry (attempt ${file.retryCount + 1}) - keeping local file for retry`);
-                await this.fileQueue.add(
-                    'process-file',
-                    { fileId },
-                    {
-                        delay: 30000, // 30 seconds delay
-                        attempts: 1,
-                    },
-                );
-            } else {
-                this.logger.error(`[File ${fileId}] Max retries reached. Cleaning up local files.`);
-                // Cleanup on max retries reached
-                shouldCleanup = true;
-            }
+            // Cleanup local files on failure
+            shouldCleanup = true;
 
             throw error;
         } finally {
-            // Only cleanup when succeeded or max retries reached
+            // Cleanup local files after success or failure
             if (finalPath && shouldCleanup) {
                 await this.cleanupLocalFiles(finalPath);
             }

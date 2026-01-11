@@ -10,6 +10,7 @@ import { PrismaTransferFolderRepository } from './infrastructure/prisma-transfer
 import { PrismaTransferFileRepository } from './infrastructure/prisma-transfer-file.repository';
 import { CreateTransferFolderUseCase } from './application/use-cases/create-transfer-folder.use-case';
 import { ProcessPendingFilesUseCase } from './application/use-cases/process-pending-files.use-case';
+import { RetryFailedFilesUseCase } from './application/use-cases/retry-failed-files.use-case';
 import { TransferController } from './presentation/transfer.controller';
 
 @Module({
@@ -42,6 +43,7 @@ import { TransferController } from './presentation/transfer.controller';
         PrismaTransferFileRepository,
         CreateTransferFolderUseCase,
         ProcessPendingFilesUseCase,
+        RetryFailedFilesUseCase,
         TransferFolderProcessor,
         TransferFileProcessor,
     ],

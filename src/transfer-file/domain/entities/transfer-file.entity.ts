@@ -7,9 +7,7 @@ interface TransferFileProps {
     originalUrl: string;
     name: string;
     status: TransferStatus;
-    retryCount: number;
     errorLog: string | null;
-    localPath: string | null;  // Path to downloaded local file for retry
     createdAt: Date;
     updatedAt: Date;
 }
@@ -20,9 +18,7 @@ export class TransferFileEntity extends BaseEntity<TransferFileProps> {
     public originalUrl: string;
     public name: string;
     public status: TransferStatus;
-    public retryCount: number;
     public errorLog: string | null;
-    public localPath: string | null;  // Path to downloaded local file for retry
     public readonly createdAt: Date;
     public readonly updatedAt: Date;
 
@@ -33,9 +29,7 @@ export class TransferFileEntity extends BaseEntity<TransferFileProps> {
         this.originalUrl = props.originalUrl;
         this.name = props.name;
         this.status = props.status;
-        this.retryCount = props.retryCount;
         this.errorLog = props.errorLog;
-        this.localPath = props.localPath ?? null;
         this.createdAt = props.createdAt;
         this.updatedAt = props.updatedAt;
         this.setInitialState();
@@ -47,9 +41,7 @@ export class TransferFileEntity extends BaseEntity<TransferFileProps> {
             originalUrl: this.originalUrl,
             name: this.name,
             status: this.status,
-            retryCount: this.retryCount,
             errorLog: this.errorLog,
-            localPath: this.localPath,
             createdAt: this.createdAt,
             updatedAt: this.updatedAt,
         };
@@ -62,9 +54,7 @@ export class TransferFileEntity extends BaseEntity<TransferFileProps> {
             originalUrl: this.originalUrl,
             name: this.name,
             status: this.status,
-            retryCount: this.retryCount,
             errorLog: this.errorLog,
-            localPath: this.localPath,
             createdAt: this.createdAt,
             updatedAt: this.updatedAt,
         };
@@ -82,23 +72,15 @@ export class TransferFileEntity extends BaseEntity<TransferFileProps> {
     markAsFailed(error: string): void {
         this.status = TransferStatus.FAILED;
         this.errorLog = error;
-        this.retryCount += 1;
+    }
+
+    markAsPending(): void {
+        this.status = TransferStatus.PENDING;
+        this.errorLog = null;
     }
 
     updateName(name: string): void {
         this.name = name;
-    }
-
-    setLocalPath(path: string): void {
-        this.localPath = path;
-    }
-
-    hasLocalFile(): boolean {
-        return this.localPath !== null;
-    }
-
-    canRetry(maxRetries: number = 3): boolean {
-        return this.retryCount < maxRetries;
     }
 
     static createNew(data: {
@@ -112,9 +94,7 @@ export class TransferFileEntity extends BaseEntity<TransferFileProps> {
             originalUrl: data.originalUrl,
             name: data.name,
             status: TransferStatus.PENDING,
-            retryCount: 0,
             errorLog: null,
-            localPath: null,
             createdAt: new Date(),
             updatedAt: new Date(),
         });
@@ -126,15 +106,10 @@ export class TransferFileEntity extends BaseEntity<TransferFileProps> {
         originalUrl: string;
         name: string;
         status: TransferStatus;
-        retryCount: number;
         errorLog: string | null;
-        localPath?: string | null;
         createdAt: Date;
         updatedAt: Date;
     }): TransferFileEntity {
-        return new TransferFileEntity({
-            ...data,
-            localPath: data.localPath ?? null,
-        });
+        return new TransferFileEntity(data);
     }
 }

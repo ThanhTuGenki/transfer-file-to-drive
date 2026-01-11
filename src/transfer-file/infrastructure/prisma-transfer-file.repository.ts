@@ -26,9 +26,7 @@ export class PrismaTransferFileRepository
             originalUrl: data.originalUrl,
             name: data.name,
             status: data.status as any,
-            retryCount: data.retryCount,
             errorLog: data.errorLog,
-            localPath: data.localPath,
             createdAt: data.createdAt,
             updatedAt: data.updatedAt,
         });
@@ -43,9 +41,7 @@ export class PrismaTransferFileRepository
             originalUrl: data.originalUrl,
             name: data.name,
             status: data.status,
-            retryCount: data.retryCount,
             errorLog: data.errorLog,
-            localPath: data.localPath,
             createdAt: data.createdAt,
             updatedAt: data.updatedAt,
         } as any;
@@ -88,6 +84,15 @@ export class PrismaTransferFileRepository
         const client = this.getClient(tx);
         const files = await client.findMany({
             where: { status: 'PENDING' },
+            orderBy: { createdAt: 'asc' },
+        });
+        return files.map((file) => this.fromData(file));
+    }
+
+    async findFailedFiles(tx?: PrismaTransactionClient): Promise<TransferFileEntity[]> {
+        const client = this.getClient(tx);
+        const files = await client.findMany({
+            where: { status: 'FAILED' },
             orderBy: { createdAt: 'asc' },
         });
         return files.map((file) => this.fromData(file));
