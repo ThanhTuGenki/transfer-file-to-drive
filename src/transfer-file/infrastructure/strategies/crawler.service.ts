@@ -1,10 +1,9 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { promises as fs, createWriteStream } from 'fs';
+import { promises as fs } from 'fs';
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import * as path from 'path';
 import { BrowserService } from './browser.service';
-import { Readable } from 'stream';
 
 const execAsync = promisify(exec);
 
@@ -20,6 +19,8 @@ interface BrowserHeaders {
 interface StreamResult {
     videoStreamUrl: string;
     audioStreamUrl: string;
+    videoDownloadUrl: string;
+    audioDownloadUrl: string;
     headers: BrowserHeaders;
 }
 
@@ -28,7 +29,7 @@ export class CrawlerService {
     private readonly logger = new Logger(CrawlerService.name);
     private readonly DOWNLOADS_DIR = path.join(process.cwd(), 'downloads');
 
-    constructor(private readonly browserService: BrowserService) {}
+    constructor(private readonly browserService: BrowserService) { }
 
     async ensureDownloadsDir(): Promise<void> {
         try {
@@ -39,138 +40,132 @@ export class CrawlerService {
     }
 
     /**
-     * Download file using fetch with streaming (fast pipe method)
+     * Navigate to stream URL page and look for download button
+     * This is for DEBUGGING - to see what the page looks like
      */
-    private async downloadWithFetch(
-        url: string,
-        headers: BrowserHeaders,
-        outputPath: string,
-    ): Promise<void> {
-        const cookieString = headers['cookie'] || headers['Cookie'];
-        const userAgent = headers['user-agent'] || headers['User-Agent'];
-        const referer = headers['referer'] || headers['Referer'];
-
-        const fetchHeaders: Record<string, string> = {
-            // Google video streams require Range header
-            'range': 'bytes=0-',
-            'accept-encoding': 'identity',
-        };
-        if (cookieString) fetchHeaders['cookie'] = cookieString;
-        if (userAgent) fetchHeaders['user-agent'] = userAgent;
-        if (referer) fetchHeaders['referer'] = referer;
+    private async getDownloadLinkFromStreamUrl(streamUrl: string): Promise<string> {
+        const page = await this.browserService.newPage();
 
         try {
-            const response = await fetch(url, {
-                headers: fetchHeaders,
-                redirect: 'manual',  // Handle redirects manually to keep Range header
-            });
+            this.logger.log(`-> [DEBUG] Navigating to stream URL...`);
+            this.logger.log(`-> [DEBUG] URL: ${streamUrl.substring(0, 100)}...`);
 
-            // Handle redirect manually
-            if (response.status === 301 || response.status === 302 || response.status === 307 || response.status === 308) {
-                const redirectUrl = response.headers.get('location');
-                if (redirectUrl) {
-                    this.logger.log(`[Debug] Redirecting to: ${redirectUrl.substring(0, 100)}...`);
-                    const redirectResponse = await fetch(redirectUrl, {
-                        headers: fetchHeaders,
-                        redirect: 'manual',
-                    });
+            // Navigate to see what happens
+            await page.goto(streamUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
 
-                    this.logger.log(`[Debug] Final Status: ${redirectResponse.status}, Type: ${redirectResponse.headers.get('content-type')}`);
+            // Take screenshot for debugging
+            const screenshotPath = path.join(process.cwd(), 'debug-screenshot.png');
+            await page.screenshot({ path: screenshotPath, fullPage: true });
+            this.logger.log(`-> [DEBUG] Screenshot saved to: ${screenshotPath}`);
 
-                    if (!redirectResponse.ok) {
-                        throw new Error(`HTTP ${redirectResponse.status}: ${redirectResponse.statusText}`);
-                    }
+            // Wait to see what happens
+            this.logger.log(`-> [DEBUG] Waiting 5 seconds to observe page...`);
+            await page.waitForTimeout(5000);
 
-                    await this.pipeToFile(redirectResponse.body!, outputPath, redirectResponse.headers.get('content-length'));
-                    return;
+            // Log page title and URL
+            const title = await page.title();
+            const currentUrl = page.url();
+            this.logger.log(`-> [DEBUG] Page title: ${title}`);
+            this.logger.log(`-> [DEBUG] Current URL: ${currentUrl.substring(0, 100)}...`);
+
+            // Try to find download link
+            const downloadSelectors = [
+                'a[href*="export=download"]',
+                'a[aria-label*="Download"]',
+                '[data-tooltip="Download"]',
+                'a[href*="uc?export=download"]',
+            ];
+
+            for (const selector of downloadSelectors) {
+                const element = await page.$(selector);
+                if (element) {
+                    const href = await element.evaluate((el: any) => el.href);
+                    this.logger.log(`-> [DEBUG] Found link with selector "${selector}": ${href?.substring(0, 80)}...`);
                 }
             }
 
-            this.logger.log(`[Debug] Status: ${response.status}, Type: ${response.headers.get('content-type')}, Length: ${response.headers.get('content-length')}`);
+            // Get all links on page
+            const allLinks = await page.$$eval('a', (anchors) =>
+                anchors.map((a: any) => ({ href: a.href, text: a.textContent?.trim() }))
+            );
+            this.logger.log(`-> [DEBUG] Total links found: ${allLinks.length}`);
 
-            if (!response.ok) {
-                throw new Error(`HTTP ${response.status}: ${response.statusText}`);
-            }
+            await page.close();
 
-            // Check if response is text (might be redirect URL in body)
-            const contentType = response.headers.get('content-type') || '';
-            if (contentType.includes('text/plain')) {
-                const stream = response.body as any;
-                const reader = stream.getReader();
-                const { value } = await reader.read();
-
-                if (value) {
-                    const text = Buffer.from(value).toString('utf8').trim();
-                    if (text.startsWith('https://') || text.startsWith('http://')) {
-                        this.logger.log(`[Debug] Got redirect URL in body, fetching: ${text.substring(0, 80)}...`);
-                        const redirectResponse = await fetch(text, {
-                            headers: fetchHeaders,
-                            redirect: 'manual',
-                        });
-
-                        this.logger.log(`[Debug] Final Status: ${redirectResponse.status}, Type: ${redirectResponse.headers.get('content-type')}`);
-
-                        if (!redirectResponse.ok) {
-                            throw new Error(`HTTP ${redirectResponse.status}: ${redirectResponse.statusText}`);
-                        }
-
-                        await this.pipeToFile(redirectResponse.body!, outputPath, redirectResponse.headers.get('content-length'));
-                        return;
-                    }
-                }
-            }
-
-            await this.pipeToFile(response.body!, outputPath, response.headers.get('content-length'));
+            // For now, return original stream URL since we're just debugging
+            return streamUrl;
         } catch (error) {
-            this.logger.error(`Fetch error: ${error.message}`);
+            await page.close();
+            this.logger.error(`-> [DEBUG] Error: ${error.message}`);
             throw error;
         }
     }
 
     /**
-     * Pipe fetch response body to file using Node.js streams (fast)
+     * Download file using curl (faster than fetch for large files)
      */
-    private async pipeToFile(body: ReadableStream, outputPath: string, contentLength: string | null): Promise<void> {
-        const totalBytes = contentLength ? parseInt(contentLength, 10) : null;
+    private async downloadWithCurl(
+        url: string,
+        cookies: string,
+        userAgent: string,
+        outputPath: string,
+    ): Promise<void> {
+        // Escape special characters in URL and paths for shell
+        const escapedUrl = url.replace(/"/g, '\\"');
+        const escapedOutputPath = outputPath.replace(/"/g, '\\"');
+        const escapedCookies = cookies.replace(/'/g, "'\\''");
 
-        // Convert Web Stream to Node.js Readable
-        const nodeStream = Readable.fromWeb(body as any);
-        const writeStream = createWriteStream(outputPath);
+        // Build curl command with progress and timeout
+        const curlCommand = `curl -L -C - "${escapedUrl}" \
+            -H "Cookie: ${escapedCookies}" \
+            -H "User-Agent: ${userAgent}" \
+            -H "Referer: https://drive.google.com/" \
+            -o "${escapedOutputPath}" \
+            --max-time 600 \
+            --progress-bar \
+            --verbose`;
 
-        return new Promise<void>((resolve, reject) => {
-            let downloadedBytes = 0;
-            let lastLoggedPercent = -1;
+        this.logger.log(`-> [CURL] Starting download to: ${path.basename(outputPath)}`);
+        this.logger.log(`-> [CURL] URL length: ${url.length} chars`);
 
-            nodeStream.on('data', (chunk) => {
-                downloadedBytes += chunk.length;
+        try {
+            this.logger.log(`-> [CURL] Executing command...`);
 
-                // Log progress every 10%
-                if (totalBytes) {
-                    const percent = Math.floor((downloadedBytes / totalBytes) * 100);
-                    if (percent > lastLoggedPercent && percent % 10 === 0) {
-                        const mb = (downloadedBytes / 1024 / 1024).toFixed(2);
-                        const totalMb = (totalBytes / 1024 / 1024).toFixed(2);
-                        this.logger.log(`[Download] ${percent}% (${mb}/${totalMb} MB)`);
-                        lastLoggedPercent = percent;
-                    }
-                }
+            const { stdout, stderr } = await execAsync(curlCommand, {
+                maxBuffer: 30 * 1024 * 1024, // 10MB buffer
+                timeout: 18000000, // 10 minutes timeout
             });
 
-            nodeStream.on('error', reject);
-            writeStream.on('error', reject);
-            writeStream.on('finish', async () => {
+            // Log any output from curl
+            if (stdout) {
+                this.logger.log(`-> [CURL] stdout: ${stdout.substring(0, 200)}`);
+            }
+            if (stderr) {
+                this.logger.log(`-> [CURL] stderr: ${stderr.substring(0, 500)}`);
+            }
+
+            // Verify file was downloaded successfully
+            this.logger.log(`-> [CURL] Checking downloaded file...`);
+            const stats = await fs.stat(outputPath);
+            this.logger.log(`-> [CURL] File size: ${stats.size} bytes`);
+
+            if (stats.size < 100000) {
+                throw new Error(`Downloaded file too small: ${stats.size} bytes`);
+            }
+
+            const sizeMB = (stats.size / 1024 / 1024).toFixed(2);
+            this.logger.log(`-> Download complete: ${sizeMB} MB`);
+        } catch (error) {
+            this.logger.error(`-> [CURL] Download failed: ${error.message}`);
+            // Try to check partial file
+            try {
                 const stats = await fs.stat(outputPath);
-                const size = stats.size;
-
-                if (size < 100000) {
-                    reject(new Error(`File too small: ${size} bytes. Likely an error page.`));
-                } else {
-                    resolve();
-                }
-            });
-
-            nodeStream.pipe(writeStream);
-        });
+                this.logger.error(`-> [CURL] Partial file size: ${stats.size} bytes`);
+            } catch {
+                // No partial file
+            }
+            throw error;
+        }
     }
 
     /**
@@ -229,12 +224,13 @@ export class CrawlerService {
             ];
             for (const selector of playSelectors) {
                 if (await page.$(selector)) {
-                    await page.click(selector, { force: true }).catch(() => {});
-                    await page.waitForTimeout(500);
+                    await page.click(selector, { force: true }).catch(() => { });
+                    await page.waitForTimeout(2000);
                 }
             }
         } catch (e) {
-            // Ignore
+            this.logger.error(`Auto-play error: ${e.message}`);
+            throw e;
         }
 
         this.logger.log('[3/4] Waiting for streams... (Timeout: 1 min)');
@@ -243,7 +239,7 @@ export class CrawlerService {
             await page.waitForTimeout(1000);
             checks++;
             if (checks % 5 === 0 && !videoStreamUrl) {
-                await page.mouse.click(640, 360).catch(() => {});
+                await page.mouse.click(640, 360).catch(() => { });
             }
             if (checks % 10 === 0) process.stdout.write('.');
         }
@@ -267,7 +263,16 @@ export class CrawlerService {
 
         await page.close();
 
-        return { videoStreamUrl, audioStreamUrl, headers };
+        // DEBUG: Navigate to stream URLs to see what's there
+        this.logger.log('[4/4] DEBUG: Exploring stream URLs...');
+
+        this.logger.log('-> Exploring Video stream URL...');
+        const videoDownloadUrl = await this.getDownloadLinkFromStreamUrl(videoStreamUrl);
+
+        this.logger.log('-> Exploring Audio stream URL...');
+        const audioDownloadUrl = await this.getDownloadLinkFromStreamUrl(audioStreamUrl);
+
+        return { videoStreamUrl, audioStreamUrl, videoDownloadUrl, audioDownloadUrl, headers };
     }
 
     /**
@@ -278,20 +283,24 @@ export class CrawlerService {
 
         this.logger.log('[0/4] Starting download process...');
 
-        const { videoStreamUrl, audioStreamUrl, headers } = await this.captureStreams(fileUrl);
+        const { videoDownloadUrl, audioDownloadUrl, headers } = await this.captureStreams(fileUrl);
 
-        this.logger.log('[4/4] Downloading streams (using Fetch)...');
+        this.logger.log('[4/4] Downloading with curl (PARALLEL)...');
 
         const timestamp = Date.now();
         const videoPath = path.join(this.DOWNLOADS_DIR, `video_${timestamp}.mp4`);
         const audioPath = path.join(this.DOWNLOADS_DIR, `audio_${timestamp}.mp4`);
         const finalPath = path.join(this.DOWNLOADS_DIR, `output_${timestamp}.mp4`);
 
-        this.logger.log('-> Downloading Video Track...');
-        await this.downloadWithFetch(videoStreamUrl, headers, videoPath);
+        const cookieString = headers.cookie || headers.Cookie || '';
+        const userAgent = headers['user-agent'] || headers['User-Agent'] || '';
 
-        this.logger.log('-> Downloading Audio Track...');
-        await this.downloadWithFetch(audioStreamUrl, headers, audioPath);
+        // PARALLEL DOWNLOAD - both video and audio at the same time!
+        this.logger.log('-> Starting PARALLEL download of Video and Audio tracks...');
+        await Promise.all([
+            this.downloadWithCurl(videoDownloadUrl, cookieString, userAgent, videoPath),
+            this.downloadWithCurl(audioDownloadUrl, cookieString, userAgent, audioPath),
+        ]);
 
         this.logger.log('[Merging] Merging files with FFmpeg...');
         const ffmpegCommand = `ffmpeg -i "${videoPath}" -i "${audioPath}" -c:v copy -c:a aac "${finalPath}" -y`;
