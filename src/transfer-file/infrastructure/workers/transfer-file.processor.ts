@@ -20,7 +20,7 @@ interface ProcessFileJobData {
 
 @Processor('file-queue', {
     concurrency: 1, // Process files sequentially
-    lockDuration: 0, // Disable lock - no need with concurrency=1
+    lockDuration: 86400000, // 24 hours - effectively unlimited for single concurrency
 })
 export class TransferFileProcessor extends WorkerHost {
     private readonly logger = new Logger(TransferFileProcessor.name);

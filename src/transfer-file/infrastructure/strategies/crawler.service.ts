@@ -1,9 +1,10 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { promises as fs } from 'fs';
+import { promises as fs, createWriteStream } from 'fs';
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import * as path from 'path';
 import { BrowserService } from './browser.service';
+import { Readable } from 'stream';
 
 const execAsync = promisify(exec);
 
@@ -38,7 +39,7 @@ export class CrawlerService {
     }
 
     /**
-     * Download file using fetch with streaming (avoids shell escaping issues)
+     * Download file using fetch with streaming (fast pipe method)
      */
     private async downloadWithFetch(
         url: string,
@@ -74,54 +75,13 @@ export class CrawlerService {
                         redirect: 'manual',
                     });
 
-                    // Check final response
-                    this.logger.log(`[Debug] Final Status: ${redirectResponse.status}, Type: ${redirectResponse.headers.get('content-type')}, Length: ${redirectResponse.headers.get('content-length')}`);
+                    this.logger.log(`[Debug] Final Status: ${redirectResponse.status}, Type: ${redirectResponse.headers.get('content-type')}`);
 
                     if (!redirectResponse.ok) {
                         throw new Error(`HTTP ${redirectResponse.status}: ${redirectResponse.statusText}`);
                     }
 
-                    // Get content length for progress tracking
-                    const contentLength = redirectResponse.headers.get('content-length');
-                    const totalBytes = contentLength ? parseInt(contentLength, 10) : null;
-
-                    const stream = redirectResponse.body as any;
-                    const reader = stream.getReader();
-                    const fileHandle = await fs.open(outputPath, 'w');
-
-                    let downloadedBytes = 0;
-                    let lastLoggedPercent = -1;
-
-                    while (true) {
-                        const { done, value } = await reader.read();
-                        if (done) break;
-
-                        await fileHandle.writeFile(value);
-                        downloadedBytes += value.length;
-
-                        // Log progress every 10%
-                        if (totalBytes) {
-                            const percent = Math.floor((downloadedBytes / totalBytes) * 100);
-                            if (percent > lastLoggedPercent && percent % 10 === 0) {
-                                const mb = (downloadedBytes / 1024 / 1024).toFixed(2);
-                                const totalMb = (totalBytes / 1024 / 1024).toFixed(2);
-                                this.logger.log(`[Download] ${percent}% (${mb}/${totalMb} MB)`);
-                                lastLoggedPercent = percent;
-                            }
-                        }
-                    }
-
-                    await fileHandle.close();
-
-                    const stats = await fs.stat(outputPath);
-                    const size = stats.size;
-
-                    if (size < 100000) {
-                        throw new Error(
-                            `File too small: ${size} bytes. Likely an error page.`,
-                        );
-                    }
-
+                    await this.pipeToFile(redirectResponse.body!, outputPath, redirectResponse.headers.get('content-length'));
                     return;
                 }
             }
@@ -141,7 +101,6 @@ export class CrawlerService {
 
                 if (value) {
                     const text = Buffer.from(value).toString('utf8').trim();
-                    // Check if it's a redirect URL
                     if (text.startsWith('https://') || text.startsWith('http://')) {
                         this.logger.log(`[Debug] Got redirect URL in body, fetching: ${text.substring(0, 80)}...`);
                         const redirectResponse = await fetch(text, {
@@ -155,65 +114,35 @@ export class CrawlerService {
                             throw new Error(`HTTP ${redirectResponse.status}: ${redirectResponse.statusText}`);
                         }
 
-                        const contentLength = redirectResponse.headers.get('content-length');
-                        const totalBytes = contentLength ? parseInt(contentLength, 10) : null;
-
-                        const redirectStream = redirectResponse.body as any;
-                        const redirectReader = redirectStream.getReader();
-                        const fileHandle = await fs.open(outputPath, 'w');
-
-                        let downloadedBytes = 0;
-                        let lastLoggedPercent = -1;
-
-                        while (true) {
-                            const { done, value: chunk } = await redirectReader.read();
-                            if (done) break;
-
-                            await fileHandle.writeFile(chunk);
-                            downloadedBytes += chunk.length;
-
-                            if (totalBytes) {
-                                const percent = Math.floor((downloadedBytes / totalBytes) * 100);
-                                if (percent > lastLoggedPercent && percent % 10 === 0) {
-                                    const mb = (downloadedBytes / 1024 / 1024).toFixed(2);
-                                    const totalMb = (totalBytes / 1024 / 1024).toFixed(2);
-                                    this.logger.log(`[Download] ${percent}% (${mb}/${totalMb} MB)`);
-                                    lastLoggedPercent = percent;
-                                }
-                            }
-                        }
-
-                        await fileHandle.close();
-
-                        const stats = await fs.stat(outputPath);
-                        const size = stats.size;
-
-                        if (size < 100000) {
-                            throw new Error(`File too small: ${size} bytes. Likely an error page.`);
-                        }
-
+                        await this.pipeToFile(redirectResponse.body!, outputPath, redirectResponse.headers.get('content-length'));
                         return;
                     }
                 }
             }
 
-            // Get content length for progress tracking
-            const contentLength = response.headers.get('content-length');
-            const totalBytes = contentLength ? parseInt(contentLength, 10) : null;
+            await this.pipeToFile(response.body!, outputPath, response.headers.get('content-length'));
+        } catch (error) {
+            this.logger.error(`Fetch error: ${error.message}`);
+            throw error;
+        }
+    }
 
-            const stream = response.body as any;
-            const reader = stream.getReader();
-            const fileHandle = await fs.open(outputPath, 'w');
+    /**
+     * Pipe fetch response body to file using Node.js streams (fast)
+     */
+    private async pipeToFile(body: ReadableStream, outputPath: string, contentLength: string | null): Promise<void> {
+        const totalBytes = contentLength ? parseInt(contentLength, 10) : null;
 
+        // Convert Web Stream to Node.js Readable
+        const nodeStream = Readable.fromWeb(body as any);
+        const writeStream = createWriteStream(outputPath);
+
+        return new Promise<void>((resolve, reject) => {
             let downloadedBytes = 0;
             let lastLoggedPercent = -1;
 
-            while (true) {
-                const { done, value } = await reader.read();
-                if (done) break;
-
-                await fileHandle.writeFile(value);
-                downloadedBytes += value.length;
+            nodeStream.on('data', (chunk) => {
+                downloadedBytes += chunk.length;
 
                 // Log progress every 10%
                 if (totalBytes) {
@@ -225,22 +154,23 @@ export class CrawlerService {
                         lastLoggedPercent = percent;
                     }
                 }
-            }
+            });
 
-            await fileHandle.close();
+            nodeStream.on('error', reject);
+            writeStream.on('error', reject);
+            writeStream.on('finish', async () => {
+                const stats = await fs.stat(outputPath);
+                const size = stats.size;
 
-            const stats = await fs.stat(outputPath);
-            const size = stats.size;
+                if (size < 100000) {
+                    reject(new Error(`File too small: ${size} bytes. Likely an error page.`));
+                } else {
+                    resolve();
+                }
+            });
 
-            if (size < 100000) {
-                throw new Error(
-                    `File too small: ${size} bytes. Likely an error page.`,
-                );
-            }
-        } catch (error) {
-            this.logger.error(`Fetch error: ${error.message}`);
-            throw error;
-        }
+            nodeStream.pipe(writeStream);
+        });
     }
 
     /**
