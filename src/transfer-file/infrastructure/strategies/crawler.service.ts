@@ -19,8 +19,8 @@ interface BrowserHeaders {
 interface StreamResult {
     videoStreamUrl: string;
     audioStreamUrl: string;
-    videoDownloadUrl: string;
-    audioDownloadUrl: string;
+    videoDownloadUrl: string;   // Valid URL for curl download (after following redirects)
+    audioDownloadUrl: string;   // Valid URL for curl download (after following redirects)
     headers: BrowserHeaders;
 }
 
@@ -40,114 +40,139 @@ export class CrawlerService {
     }
 
     /**
-     * Navigate to stream URL page and look for download button
-     * This is for DEBUGGING - to see what the page looks like
+     * Navigate to stream URL and follow redirects to find actual video stream
+     * - If <video> tag exists → Return URL (VALID)
+     * - If no <video> → Check <pre> → Follow redirect
+     * - If no <pre> → Reload page and retry
+     * - Each attempt 5 seconds apart, max 5 attempts
      */
     private async getDownloadLinkFromStreamUrl(streamUrl: string): Promise<string> {
         const page = await this.browserService.newPage();
 
-        try {
-            this.logger.log(`-> [DEBUG] Navigating to stream URL...`);
-            this.logger.log(`-> [DEBUG] URL: ${streamUrl.substring(0, 100)}...`);
+        let currentUrl = streamUrl;
+        let attempts = 0;
+        const maxAttempts = 10;
 
-            // Navigate to see what happens
-            await page.goto(streamUrl, { waitUntil: 'domcontentloaded', timeout: 30000 });
+        while (attempts < maxAttempts) {
+            attempts++;
+            this.logger.log(`-> [Attempt ${attempts}/${maxAttempts}] Checking: ${currentUrl.substring(0, 80)}...`);
 
-            // Take screenshot for debugging
-            const screenshotPath = path.join(process.cwd(), 'debug-screenshot.png');
-            await page.screenshot({ path: screenshotPath, fullPage: true });
-            this.logger.log(`-> [DEBUG] Screenshot saved to: ${screenshotPath}`);
+            await page.goto(currentUrl, { waitUntil: 'domcontentloaded', timeout: 100000 });
+            await page.waitForTimeout(5000);  // Wait 5 seconds for content to load
 
-            // Wait to see what happens
-            this.logger.log(`-> [DEBUG] Waiting 5 seconds to observe page...`);
-            await page.waitForTimeout(5000);
-
-            // Log page title and URL
-            const title = await page.title();
-            const currentUrl = page.url();
-            this.logger.log(`-> [DEBUG] Page title: ${title}`);
-            this.logger.log(`-> [DEBUG] Current URL: ${currentUrl.substring(0, 100)}...`);
-
-            // Try to find download link
-            const downloadSelectors = [
-                'a[href*="export=download"]',
-                'a[aria-label*="Download"]',
-                '[data-tooltip="Download"]',
-                'a[href*="uc?export=download"]',
-            ];
-
-            for (const selector of downloadSelectors) {
-                const element = await page.$(selector);
-                if (element) {
-                    const href = await element.evaluate((el: any) => el.href);
-                    this.logger.log(`-> [DEBUG] Found link with selector "${selector}": ${href?.substring(0, 80)}...`);
+            // Priority 1: Check for <video> tag - if exists, this is VALID URL
+            const videoElement = await page.$('video');
+            if (videoElement) {
+                // Try to get src from video element
+                let videoSrc = await videoElement.evaluate((el: any) => el.src);
+                if (!videoSrc) {
+                    // Try to get src from <source> tag inside video
+                    const sourceElement = await videoElement.$('source');
+                    if (sourceElement) {
+                        videoSrc = await sourceElement.evaluate((el: any) => el.src);
+                    }
+                }
+                if (videoSrc) {
+                    this.logger.log(`-> [SUCCESS] Found <video> tag with src: ${videoSrc.substring(0, 80)}...`);
+                    await page.close();
+                    return videoSrc;
                 }
             }
 
-            // Get all links on page
-            const allLinks = await page.$$eval('a', (anchors) =>
-                anchors.map((a: any) => ({ href: a.href, text: a.textContent?.trim() }))
-            );
-            this.logger.log(`-> [DEBUG] Total links found: ${allLinks.length}`);
+            // Priority 2: Check for <pre> tag with redirect URL
+            const preElement = await page.$('pre');
+            if (preElement) {
+                const preContentRaw = await preElement.evaluate((el: any) => el.textContent?.trim());
+                if (preContentRaw) {
+                    // Decode HTML entities using browser
+                    const preContent = await page.evaluate((content) => {
+                        const textarea = document.createElement('textarea');
+                        textarea.innerHTML = content;
+                        return textarea.value;
+                    }, preContentRaw);
 
-            await page.close();
+                    if (preContent.startsWith('http')) {
+                        this.logger.log(`-> [REDIRECT] Found URL in <pre>, following...`);
+                        this.logger.log(`-> [REDIRECT] URL: ${preContent.substring(0, 80)}...`);
+                        currentUrl = preContent;
+                        continue;  // Try the redirect URL
+                    }
+                }
+            }
 
-            // For now, return original stream URL since we're just debugging
-            return streamUrl;
-        } catch (error) {
-            await page.close();
-            this.logger.error(`-> [DEBUG] Error: ${error.message}`);
-            throw error;
+            // Priority 3: No <video> and no <pre> - reload same page
+            this.logger.log(`-> [RETRY] No <video> or <pre> found, reloading...`);
         }
+
+        await page.close();
+        throw new Error(`Failed to find video stream after ${maxAttempts} attempts.`);
     }
 
     /**
-     * Download file using curl (faster than fetch for large files)
+     * Download file using aria2c with 16 parallel connections (much faster than curl)
      */
-    private async downloadWithCurl(
+    private async downloadWithAria(
         url: string,
         cookies: string,
         userAgent: string,
         outputPath: string,
     ): Promise<void> {
-        // Escape special characters in URL and paths for shell
+        // Escape special characters for shell
         const escapedUrl = url.replace(/"/g, '\\"');
-        const escapedOutputPath = outputPath.replace(/"/g, '\\"');
         const escapedCookies = cookies.replace(/'/g, "'\\''");
+        const escapedUserAgent = userAgent.replace(/'/g, "'\\''");
 
-        // Build curl command with progress and timeout
-        const curlCommand = `curl -L -C - "${escapedUrl}" \
-            -H "Cookie: ${escapedCookies}" \
-            -H "User-Agent: ${userAgent}" \
-            -H "Referer: https://drive.google.com/" \
-            -o "${escapedOutputPath}" \
-            --max-time 600 \
-            --progress-bar \
-            --verbose`;
+        // aria2c requires separate directory and filename
+        const outputDir = path.dirname(outputPath);
+        const outputFileName = path.basename(outputPath);
+        const escapedDir = outputDir.replace(/"/g, '\\"');
+        const escapedFileName = outputFileName.replace(/"/g, '\\"');
 
-        this.logger.log(`-> [CURL] Starting download to: ${path.basename(outputPath)}`);
-        this.logger.log(`-> [CURL] URL length: ${url.length} chars`);
+        // Build aria2c command with 16 parallel connections
+        // -x 16: 16 connections per server
+        // -s 16: Split file into 16 pieces
+        // -k 1M: Minimum chunk size 1MB
+        // --continue=true: Resume partial downloads
+        const ariaCommand = `aria2c -x 16 -s 16 -k 1M \
+            -d "${escapedDir}" \
+            -o "${escapedFileName}" \
+            --header="Cookie: ${escapedCookies}" \
+            --header="User-Agent: ${escapedUserAgent}" \
+            --header="Referer: https://drive.google.com/" \
+            --max-tries=5 \
+            --retry-wait=5 \
+            --timeout=600 \
+            --max-file-not-found=5 \
+            --continue=true \
+            --auto-file-renaming=false \
+            --allow-overwrite=true \
+            --check-integrity=false \
+            "${escapedUrl}"`;
+
+        this.logger.log(`-> [ARIA2] Starting download to: ${outputFileName}`);
+        this.logger.log(`-> [ARIA2] Using 16 parallel connections`);
+        this.logger.log(`-> [ARIA2] URL length: ${url.length} chars`);
 
         try {
-            this.logger.log(`-> [CURL] Executing command...`);
+            this.logger.log(`-> [ARIA2] Executing command...`);
 
-            const { stdout, stderr } = await execAsync(curlCommand, {
-                maxBuffer: 30 * 1024 * 1024, // 10MB buffer
+            const { stdout, stderr } = await execAsync(ariaCommand, {
+                maxBuffer: 50 * 1024 * 1024, // 50MB buffer for aria2c verbose output
                 timeout: 18000000, // 10 minutes timeout
             });
 
-            // Log any output from curl
+            // Log aria2c output (it shows download progress)
             if (stdout) {
-                this.logger.log(`-> [CURL] stdout: ${stdout.substring(0, 200)}`);
+                this.logger.log(`-> [ARIA2] stdout: ${stdout.substring(0, 500)}`);
             }
             if (stderr) {
-                this.logger.log(`-> [CURL] stderr: ${stderr.substring(0, 500)}`);
+                this.logger.log(`-> [ARIA2] stderr: ${stderr.substring(0, 500)}`);
             }
 
             // Verify file was downloaded successfully
-            this.logger.log(`-> [CURL] Checking downloaded file...`);
+            this.logger.log(`-> [ARIA2] Checking downloaded file...`);
             const stats = await fs.stat(outputPath);
-            this.logger.log(`-> [CURL] File size: ${stats.size} bytes`);
+            this.logger.log(`-> [ARIA2] File size: ${stats.size} bytes`);
 
             if (stats.size < 100000) {
                 throw new Error(`Downloaded file too small: ${stats.size} bytes`);
@@ -156,11 +181,11 @@ export class CrawlerService {
             const sizeMB = (stats.size / 1024 / 1024).toFixed(2);
             this.logger.log(`-> Download complete: ${sizeMB} MB`);
         } catch (error) {
-            this.logger.error(`-> [CURL] Download failed: ${error.message}`);
+            this.logger.error(`-> [ARIA2] Download failed: ${error.message}`);
             // Try to check partial file
             try {
                 const stats = await fs.stat(outputPath);
-                this.logger.error(`-> [CURL] Partial file size: ${stats.size} bytes`);
+                this.logger.error(`-> [ARIA2] Partial file size: ${stats.size} bytes`);
             } catch {
                 // No partial file
             }
@@ -203,7 +228,7 @@ export class CrawlerService {
 
         this.logger.log(`[1/4] Navigating to ${fileUrl}`);
         await page.goto(fileUrl);
-        await page.waitForTimeout(2000);
+        await page.waitForTimeout(10000);
 
         // Check if session expired
         const currentUrl = page.url();
@@ -238,9 +263,6 @@ export class CrawlerService {
         while ((!videoStreamUrl || !audioStreamUrl) && checks < 60) {
             await page.waitForTimeout(1000);
             checks++;
-            if (checks % 5 === 0 && !videoStreamUrl) {
-                await page.mouse.click(640, 360).catch(() => { });
-            }
             if (checks % 10 === 0) process.stdout.write('.');
         }
         console.log('\n');
@@ -263,8 +285,8 @@ export class CrawlerService {
 
         await page.close();
 
-        // DEBUG: Navigate to stream URLs to see what's there
-        this.logger.log('[4/4] DEBUG: Exploring stream URLs...');
+        // Navigate to stream URLs to find valid download URLs (follow redirects)
+        this.logger.log('[4/4] Exploring stream URLs to find valid download URLs...');
 
         this.logger.log('-> Exploring Video stream URL...');
         const videoDownloadUrl = await this.getDownloadLinkFromStreamUrl(videoStreamUrl);
@@ -285,7 +307,7 @@ export class CrawlerService {
 
         const { videoDownloadUrl, audioDownloadUrl, headers } = await this.captureStreams(fileUrl);
 
-        this.logger.log('[4/4] Downloading with curl (PARALLEL)...');
+        this.logger.log('[4/4] Downloading with aria2c (16 connections, PARALLEL)...');
 
         const timestamp = Date.now();
         const videoPath = path.join(this.DOWNLOADS_DIR, `video_${timestamp}.mp4`);
@@ -298,8 +320,8 @@ export class CrawlerService {
         // PARALLEL DOWNLOAD - both video and audio at the same time!
         this.logger.log('-> Starting PARALLEL download of Video and Audio tracks...');
         await Promise.all([
-            this.downloadWithCurl(videoDownloadUrl, cookieString, userAgent, videoPath),
-            this.downloadWithCurl(audioDownloadUrl, cookieString, userAgent, audioPath),
+            this.downloadWithAria(videoDownloadUrl, cookieString, userAgent, videoPath),
+            this.downloadWithAria(audioDownloadUrl, cookieString, userAgent, audioPath),
         ]);
 
         this.logger.log('[Merging] Merging files with FFmpeg...');
