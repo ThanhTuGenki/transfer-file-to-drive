@@ -227,7 +227,7 @@ export class CrawlerService {
         });
 
         this.logger.log(`[1/4] Navigating to ${fileUrl}`);
-        await page.goto(fileUrl);
+        await page.goto(fileUrl, { waitUntil: 'domcontentloaded', timeout: 100000 });
         await page.waitForTimeout(10000);
 
         // Check if session expired

@@ -230,7 +230,7 @@ export class BrowserService implements OnModuleInit, OnModuleDestroy {
      */
     async navigateTo(url: string): Promise<Page> {
         const page = this.getPage();
-        await page.goto(url);
+        await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 100000 });
         return page;
     }
 }

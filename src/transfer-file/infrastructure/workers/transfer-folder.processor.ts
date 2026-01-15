@@ -131,7 +131,7 @@ export class TransferFolderProcessor extends WorkerHost {
             throw new Error('SESSION_EXPIRED: Google session expired. Please restart server and login again.');
         }
 
-        await page.goto(folderUrl);
+        await page.goto(folderUrl, { waitUntil: 'domcontentloaded', timeout: 100000 });
         await page.waitForTimeout(3000);
 
         // Wait for initial page load
