@@ -24,6 +24,8 @@ export class PrismaTransferFolderRepository
             id: data.id,
             url: data.url,
             name: data.name,
+            path: data.path,
+            parentId: data.parentId ?? undefined,
             status: data.status as any,
             createdAt: data.createdAt,
             updatedAt: data.updatedAt,

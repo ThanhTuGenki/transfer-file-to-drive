@@ -50,6 +50,16 @@ export class TransferFileProcessor extends WorkerHost {
             throw new Error(`Folder ${file.folderId} not found`);
         }
 
+        // Get root folder for the destination name
+        const rootFolder = await this.getRootFolder(folder);
+        if (!rootFolder) {
+            throw new Error(`Root folder not found for file ${fileId}`);
+        }
+        const rootFolderName = rootFolder.name;
+
+        this.logger.log(`[File ${fileId}] Folder path: ${folder.path || '(root)'}`);
+        this.logger.log(`[File ${fileId}] Root folder: ${rootFolderName}`);
+
         let finalPath: string | null = null;
         let shouldCleanup = false;
 
@@ -62,8 +72,13 @@ export class TransferFileProcessor extends WorkerHost {
             const outputPath = await this.crawler.downloadAndProcess(file.originalUrl);
             this.logger.log(`[File ${fileId}] Downloaded to: ${outputPath}`);
 
+            // Build destination path with folder structure
+            const destinationPath = folder.path
+                ? `${rootFolderName}/${folder.path}`
+                : rootFolderName;
+
             // Upload to destination Drive using Rclone
-            finalPath = await this.uploadToDrive(outputPath, folder.name, file.name);
+            finalPath = await this.uploadToDrive(outputPath, destinationPath, file.name);
 
             // Mark as COMPLETED
             file.markAsCompleted();
@@ -98,13 +113,45 @@ export class TransferFileProcessor extends WorkerHost {
     }
 
     /**
+     * Get the root folder by traversing up the parent chain
+     */
+    private async getRootFolder(folder: { id: string; parentId?: string }): Promise<{ id: string; name: string; path: string } | null> {
+        let currentFolder: { id: string; name: string; path: string; parentId?: string | null } | null = await this.prisma.transferFolder.findUnique({
+            where: { id: folder.id },
+            select: { id: true, name: true, path: true, parentId: true },
+        });
+
+        if (!currentFolder) {
+            return null;
+        }
+
+        let rootFolder = currentFolder;
+
+        while (currentFolder && currentFolder.parentId) {
+            const parent = await this.prisma.transferFolder.findUnique({
+                where: { id: currentFolder.parentId },
+                select: { id: true, name: true, path: true, parentId: true },
+            });
+
+            if (parent) {
+                rootFolder = parent;
+                currentFolder = parent;
+            } else {
+                break;
+            }
+        }
+
+        return rootFolder;
+    }
+
+    /**
      * Upload file to destination Google Drive using Rclone
      * @param filePath Local path to the merged output file
-     * @param folderName Destination folder name on Drive B
+     * @param destinationPath Destination path on Drive B (e.g., "RootFolder/season1/ep1")
      * @param fileName Original file name to use on Drive B
      * @returns Final path of the file (after rename)
      */
-    private async uploadToDrive(filePath: string, folderName: string, fileName: string): Promise<string> {
+    private async uploadToDrive(filePath: string, destinationPath: string, fileName: string): Promise<string> {
         const RCLONE_CONF = path.join(process.cwd(), 'config', 'rclone.conf');
         const dir = path.dirname(filePath);
 
@@ -122,7 +169,7 @@ export class TransferFileProcessor extends WorkerHost {
         }
 
         const fileToUpload = wasRenamed ? renamedPath : filePath;
-        const destPath = `tyziiu:"${folderName}"`;
+        const destPath = `tyziiu:"${destinationPath}"`;
 
         this.logger.log(`[Rclone] Uploading ${fileName} to ${destPath}...`);
 

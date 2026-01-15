@@ -12,6 +12,8 @@ interface TransferFolderProps {
     id: string;
     url: string;
     name: string;
+    path: string;
+    parentId?: string;
     status: TransferStatus;
     createdAt: Date;
     updatedAt: Date;
@@ -21,6 +23,8 @@ export class TransferFolderEntity extends BaseEntity<TransferFolderProps> {
     public readonly id: string;
     public url: string;
     public name: string;
+    public path: string;
+    public readonly parentId?: string;
     public status: TransferStatus;
     public readonly createdAt: Date;
     public readonly updatedAt: Date;
@@ -30,6 +34,8 @@ export class TransferFolderEntity extends BaseEntity<TransferFolderProps> {
         this.id = props.id;
         this.url = props.url;
         this.name = props.name;
+        this.path = props.path;
+        this.parentId = props.parentId;
         this.status = props.status;
         this.createdAt = props.createdAt;
         this.updatedAt = props.updatedAt;
@@ -40,6 +46,8 @@ export class TransferFolderEntity extends BaseEntity<TransferFolderProps> {
         return {
             url: this.url,
             name: this.name,
+            path: this.path,
+            parentId: this.parentId,
             status: this.status,
             createdAt: this.createdAt,
             updatedAt: this.updatedAt,
@@ -51,6 +59,8 @@ export class TransferFolderEntity extends BaseEntity<TransferFolderProps> {
             id: this.id,
             url: this.url,
             name: this.name,
+            path: this.path,
+            parentId: this.parentId,
             status: this.status,
             createdAt: this.createdAt,
             updatedAt: this.updatedAt,
@@ -73,11 +83,13 @@ export class TransferFolderEntity extends BaseEntity<TransferFolderProps> {
         this.name = name;
     }
 
-    static createNew(data: { url: string; name?: string }): TransferFolderEntity {
+    static createNew(data: { url: string; name?: string; parentId?: string; path?: string }): TransferFolderEntity {
         return new TransferFolderEntity({
             id: '0',
             url: data.url,
             name: data.name ?? 'Transfer',
+            path: data.path ?? '',
+            parentId: data.parentId,
             status: TransferStatus.PENDING,
             createdAt: new Date(),
             updatedAt: new Date(),
@@ -88,6 +100,8 @@ export class TransferFolderEntity extends BaseEntity<TransferFolderProps> {
         id: string;
         url: string;
         name: string;
+        path: string;
+        parentId?: string;
         status: TransferStatus;
         createdAt: Date;
         updatedAt: Date;
